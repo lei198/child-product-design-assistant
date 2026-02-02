@@ -1,0 +1,171 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create Release'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-licenses: true
+          api-level: 34
+          build-tools: 34.0.0
+          cmake: 3.22.1
+          ndk: 25.2.9519653
+        # 注意：建议将来替换为官方方案 actions/setup-java with android-sdk: true
+        # 参考：https://github.com/actions/setup-java#android-sdk
+
+      - name: Setup Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.gradle/daemon
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/gradle.properties') }}-v3
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx4096m -XX:MaxMetaspaceSize=1024m"
+
+      - name: Build Release APK
+        run: ./gradlew clean assembleRelease --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx4096m -XX:MaxMetaspaceSize=1024m"
+          # 如需签名Release APK，请添加以下环境变量：
+          # SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          # SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          # SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        # 签名配置需在 app/build.gradle 中配置 signingConfigs.release
+
+      - name: Verify Debug APK
+        run: |
+          echo "=== Verifying Debug APK ==="
+          aapt dump badging app/build/outputs/apk/debug/*.apk | head -5
+          ls -lh app/build/outputs/apk/debug/*.apk
+
+      - name: Verify Release APK
+        run: |
+          echo "=== Verifying Release APK ==="
+          aapt dump badging app/build/outputs/apk/release/*.apk | head -5
+          ls -lh app/build/outputs/apk/release/*.apk
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Get version info
+        id: version
+        run: |
+          VERSION_NAME=$(grep 'versionName' app/build.gradle | awk '{print $2}' | tr -d '"')
+          VERSION_CODE=$(grep 'versionCode' app/build.gradle | awk '{print $2}')
+          echo "versionName=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "versionCode=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION_NAME ($VERSION_CODE)"
+
+      - name: Create GitHub Release
+        if: github.event.inputs.release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.versionName }}-build${{ github.run_number }}
+          name: Release v${{ steps.version.outputs.versionName }}
+          body: |
+            ## 🎉 自动发布
+            
+            ### 📦 版本信息
+            - **版本**: ${{ steps.version.outputs.versionName }}
+            - **构建号**: ${{ github.run_number }}
+            - **提交**: ${{ github.sha }}
+            
+            ### 📥 下载
+            
+            #### Debug版本（测试用）
+            - `app-debug-v${{ steps.version.outputs.versionName }}.apk`
+            
+            #### Release版本（发布用）
+            - `app-release-v${{ steps.version.outputs.versionName }}.apk`
+            
+            ### 🔧 功能特性
+            - 标准隔离机制（防止参数混用）
+            - 假人映射修正（8种假人类型）
+            - ROADMATE 360格式测试矩阵
+            - 输入合规性验证
+            
+            ### 📚 使用说明
+            1. 下载APK文件
+            2. 在Android设备上安装
+            3. 开启"未知来源应用"权限
+            4. 安装并运行
+          
+          files: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build summary
+        run: |
+          echo "## 📦 构建结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **构建成功**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 APK文件" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 类型 | 文件名 | 大小 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Debug | app-debug.apk | $(du -h app/build/outputs/apk/debug/*.apk | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | app-release-unsigned.apk | $(du -h app/build/outputs/apk/release/*.apk | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 构建信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **分支**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **提交**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **触发者**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **构建时间**: $(date)" >> $GITHUB_STEP_SUMMARY
